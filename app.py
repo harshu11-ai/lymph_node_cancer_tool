@@ -35,7 +35,7 @@ model = CancerClassifier()
 try:
     # Load checkpoint with safe globals for numpy scalar
     with safe_globals(['numpy._core.multiarray.scalar']):
-        checkpoint = torch.load('cancer_classifier_best.pth', weights_only=False)
+        checkpoint = torch.load('cancer_classifier_best.pth', weights_only=False, map_location=torch.device('cpu'))
         model.load_state_dict(checkpoint['model_state_dict'])
         print("Model loaded successfully!")
 except Exception as e:
@@ -43,7 +43,7 @@ except Exception as e:
     raise
 
 model.eval()
-model.to(device)
+model.to(torch.device('cpu'))
 
 # Image preprocessing
 transform = transforms.Compose([
