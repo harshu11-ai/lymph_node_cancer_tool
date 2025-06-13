@@ -30,7 +30,7 @@ class CancerClassifier(nn.Module):
         return self.resnet(x)
 
 # Load model
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+device = torch.device("cpu")
 model = CancerClassifier()
 
 try:
@@ -62,7 +62,8 @@ def predict():
     file = request.files['image']
     try:
         image = Image.open(io.BytesIO(file.read())).convert('RGB')
-        image = transform(image).unsqueeze(0).to(device)
+        image = transform(image).unsqueeze(0).to("cpu")
+        model.to("cpu")
 
         with torch.no_grad():
             output = model(image)
