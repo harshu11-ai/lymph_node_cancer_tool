@@ -62,6 +62,27 @@ class CancerClassifier(nn.Module):
     def forward(self, x):
         return self.resnet(x)
 
+class BalancedBCELoss(nn.Module):
+    def __init__(self, alpha=0.5):
+        super(BalancedBCELoss, self).__init__()
+        self.alpha = alpha  # Weight for false positives vs false negatives
+        
+    def forward(self, pred, target):
+        # Standard BCE loss
+        bce_loss = F.binary_cross_entropy_with_logits(pred, target, reduction='none')
+        
+        # Calculate weights for false positives and false negatives
+        false_pos_weight = (target == 0).float() * self.alpha
+        false_neg_weight = (target == 1).float() * (1 - self.alpha)
+        
+        # Combine weights
+        weights = false_pos_weight + false_neg_weight
+        
+        # Apply weights and take mean
+        weighted_loss = (bce_loss * weights).mean()
+        
+        return weighted_loss
+
 def main():
     train_x_path = '/Users/harshithyallampalli/Downloads/Lymph_Node_Project/camelyonpatch_level_2_split_train_x.h5-002'
     train_y_path = '/Users/harshithyallampalli/Downloads/Lymph_Node_Project/drive-download-20250510T015435Z-001/camelyonpatch_level_2_split_train_y.h5'
@@ -88,14 +109,6 @@ def main():
     print("Image shape:", X_train.shape)
     print("Label shape:", y_train.shape)
     
-    # Print label distribution
-    unique_labels, counts = np.unique(y_train, return_counts=True)
-    label_dist = dict(zip(unique_labels, counts))
-    print("\nLabel distribution in sampled training data:")
-    print(f"Negative (no cancer): {label_dist.get(0, 0)} images")
-    print(f"Positive (cancer): {label_dist.get(1, 0)} images")
-    print(f"Class balance: {label_dist.get(1, 0)/len(y_train)*100:.2f}% positive cases")
-
     # Load the test data
     with h5py.File(test_x_path, 'r') as f:
         X_test = np.array(f['x'])
@@ -174,41 +187,40 @@ def main():
         use_amp = True
         scaler = torch.amp.GradScaler()
     
-    # Calculate statistics and class weights to favor positive predictions
+    # Calculate statistics and class weights
     total_samples = len(y_train)
     pos_samples = np.sum(y_train)
     neg_samples = total_samples - pos_samples
     
-    # Using a high positive weight to heavily penalize false negatives
-    pos_weight = torch.tensor([1.1], dtype=torch.float32).to(device)  # Increased weight for positive class
+    # Using balanced weights since dataset is balanced
+    pos_weight = torch.tensor([1.0], dtype=torch.float32).to(device)
     
     print(f"\nDataset statistics:")
     print(f"Total samples: {total_samples}")
     print(f"Positive samples: {pos_samples}")
     print(f"Negative samples: {neg_samples}")
-    print(f"Using positive weight: {pos_weight.item():.4f}")
+    print(f"Using balanced weights")
     
-    # Weighted BCE loss
-    criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+    # Use balanced BCE loss
+    criterion = BalancedBCELoss(alpha=0.5)  # Equal weight to false positives and negatives
     
-    # Optimizer with slightly higher learning rate
-    optimizer = optim.Adam(model.parameters(), lr=0.0001, weight_decay=0.01)
+    # Optimizer with L2 regularization
+    optimizer = optim.Adam(model.parameters(), lr=0.0001, weight_decay=0.001)
     
-    # Simple step LR scheduler
-    scheduler = torch.optim.lr_scheduler.StepLR(
+    # Cosine annealing scheduler for better convergence
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer,
-        step_size=6,
-        gamma=0.3
+        T_max=20,  # Number of epochs
+        eta_min=1e-6  # Minimum learning rate
     )
 
     do_train = False  # Enable training with new settings
     if do_train:
         print("Training new ResNet18 model...")
-        num_epochs = 20  # Reduced epochs
-        best_val_acc = 0.0
-        patience = 5  # Reduced patience
+        num_epochs = 20
+        best_f1_score = 0.0
+        patience = 5
         patience_counter = 0
-        best_false_neg_rate = 1.0
         
         for epoch in range(num_epochs):
             running_loss = 0.0
@@ -244,7 +256,7 @@ def main():
                 running_loss += loss.item()
                 
                 with torch.no_grad():
-                    predicted = (torch.sigmoid(outputs) > 0.25).float()  # Lower threshold to favor positive predictions
+                    predicted = (torch.sigmoid(outputs) > 0.5).float()  # Balanced threshold
                     all_train_preds.extend(predicted.cpu().numpy())
                     all_train_labels.extend(labels.cpu().numpy())
             
@@ -262,7 +274,7 @@ def main():
             print(f"Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.2f}%")
             print(f"Train Positive Acc: {train_pos_acc:.2f}%, Train Negative Acc: {train_neg_acc:.2f}%")
             
-            # Validation every epoch now
+            # Validation
             model.eval()
             val_loss = 0.0
             all_val_preds = []
@@ -276,7 +288,7 @@ def main():
                     loss = criterion(outputs, labels)
                     val_loss += loss.item()
                     
-                    predicted = (torch.sigmoid(outputs) > 0.25).float()  # Lower threshold to favor positive predictions
+                    predicted = (torch.sigmoid(outputs) > 0.5).float()  # Balanced threshold
                     all_val_preds.extend(predicted.cpu().numpy())
                     all_val_labels.extend(labels.cpu().numpy())
             
@@ -289,16 +301,22 @@ def main():
             val_pos_acc = 100 * np.sum((val_preds == 1) & (val_labels == 1)) / np.sum(val_labels == 1)
             val_neg_acc = 100 * np.sum((val_preds == 0) & (val_labels == 0)) / np.sum(val_labels == 0)
             
-            # Calculate false negative rate
-            false_neg_rate = np.sum((val_labels == 1) & (val_preds == 0)) / np.sum(val_labels == 1)
+            # Calculate F1 score
+            tp = np.sum((val_preds == 1) & (val_labels == 1))
+            fp = np.sum((val_preds == 1) & (val_labels == 0))
+            fn = np.sum((val_preds == 0) & (val_labels == 1))
+            precision = tp / (tp + fp) if (tp + fp) > 0 else 0
+            recall = tp / (tp + fn) if (tp + fn) > 0 else 0
+            f1_score = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0
             
             print(f"Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.2f}%")
             print(f"Val Positive Acc: {val_pos_acc:.2f}%, Val Negative Acc: {val_neg_acc:.2f}%")
-            print(f"False Negative Rate: {false_neg_rate:.4f}")
+            print(f"Precision: {precision:.4f}, Recall: {recall:.4f}")
+            print(f"F1 Score: {f1_score:.4f}")
             
-            # Save model if false negative rate improves
-            if epoch == 0 or false_neg_rate < best_false_neg_rate:
-                best_false_neg_rate = false_neg_rate
+            # Save model if F1 score improves
+            if epoch == 0 or f1_score > best_f1_score:
+                best_f1_score = f1_score
                 patience_counter = 0
                 torch.save({
                     'epoch': epoch,
@@ -306,37 +324,27 @@ def main():
                     'optimizer_state_dict': optimizer.state_dict(),
                     'scheduler_state_dict': scheduler.state_dict(),
                     'val_acc': val_acc,
-                    'false_neg_rate': false_neg_rate
-                }, 'cancer_classifier_best.pth')
-                print(f"Saved best model with false negative rate: {false_neg_rate:.4f}")
+                    'val_pos_acc': val_pos_acc,
+                    'val_neg_acc': val_neg_acc,
+                    'f1_score': f1_score,
+                    'precision': precision,
+                    'recall': recall
+                }, 'cancer_classifier_bestv2.pth')
+                print(f"Saved best model with F1 score: {f1_score:.4f}")
             else:
                 patience_counter += 1
                 if patience_counter >= patience:
-                    print(f"\nEarly stopping triggered! No improvement in false negative rate for {patience} epochs.")
+                    print(f"\nEarly stopping triggered! No improvement in F1 score for {patience} epochs.")
                     break
             
             scheduler.step()
             print("-" * 50)
     else:
         model_loaded = False
-        try:
-            # Add numpy scalar to safe globals
-            with safe_globals(['numpy._core.multiarray.scalar']):
-                checkpoint = torch.load('cancer_classifier_best.pth', weights_only=False)
-                model.load_state_dict(checkpoint['model_state_dict'])
-                print("Loaded best model checkpoint.")
-                model_loaded = True
-        except FileNotFoundError:
-            try:
-                with safe_globals(['numpy._core.multiarray.scalar']):
-                    checkpoint = torch.load('cancer_classifier.pth', weights_only=False)
-                    model.load_state_dict(checkpoint)
-                    print("Loaded model from old checkpoint.")
-                    model_loaded = True
-            except FileNotFoundError:
-                print("No model checkpoint found. Please train the model first.")
-                exit()
-
+        checkpoint = torch.load('cancer_classifier_best.pth', weights_only=False)
+        model.load_state_dict(checkpoint['model_state_dict'])
+        print("Loaded best model checkpoint.")
+        model_loaded = True
         if model_loaded:
             model.eval()
             correct = 0
