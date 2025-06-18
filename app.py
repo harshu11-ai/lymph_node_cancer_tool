@@ -13,18 +13,25 @@ app = Flask(__name__)
 class CancerClassifier(nn.Module):
     def __init__(self):
         super(CancerClassifier, self).__init__()
-        self.resnet = models.mobilenet_v2(weights=models.MobileNet_V2_Weights.IMAGENET1K_V1)
-        num_ftrs = self.resnet.fc.in_features
-        
-        # Match the classifier architecture from training
-        self.classifier = nn.Sequential(
-            nn.Linear(num_ftrs, 512),
-            nn.ReLU(),
-            nn.Dropout(0.5),
-            nn.Linear(512, 1)
-        )
-        
-        self.resnet.fc = self.classifier
+        try:
+            # Initialize MobileNetV2 with pretrained weights
+            self.resnet = models.mobilenet_v2(pretrained=True)
+            # Get the number of features from the classifier
+            num_ftrs = self.resnet.classifier[1].in_features
+            
+            # Match the classifier architecture from training
+            self.classifier = nn.Sequential(
+                nn.Linear(num_ftrs, 512),
+                nn.ReLU(),
+                nn.Dropout(0.5),
+                nn.Linear(512, 1)
+            )
+            
+            # Replace the classifier
+            self.resnet.classifier = self.classifier
+        except Exception as e:
+            print(f"Error initializing model: {str(e)}")
+            raise
 
     def forward(self, x):
         return self.resnet(x)
