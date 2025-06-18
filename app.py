@@ -13,7 +13,7 @@ app = Flask(__name__)
 class CancerClassifier(nn.Module):
     def __init__(self):
         super(CancerClassifier, self).__init__()
-        self.resnet = models.resnet18(weights=models.ResNet18_Weights.IMAGENET1K_V1)
+        self.resnet = models.mobilenet_v2(weights=models.MobileNet_V2_Weights.IMAGENET1K_V1)
         num_ftrs = self.resnet.fc.in_features
         
         # Match the classifier architecture from training
